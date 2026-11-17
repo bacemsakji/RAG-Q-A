@@ -1,10 +1,11 @@
-"""Step 3: expose the RAG pipeline as a FastAPI service.
-
-Run:  uvicorn app:app --reload      then open http://127.0.0.1:8000/docs
-"""
+"""FastAPI backend: RAG Q&A + document management dashboard."""
+import shutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import config
@@ -13,32 +14,134 @@ from rag import RAG
 state: dict = {}
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def reload_index():
+    """(Re)load the FAISS index into state."""
     try:
         state["rag"] = RAG()
-    except Exception as e:  # index missing -> API still starts, /ask returns 503
+        state.pop("error", None)
+    except Exception as e:
+        state.pop("rag", None)
         state["error"] = str(e)
+
+
+def rebuild_index():
+    """Rebuild the FAISS index from scratch and reload it."""
+    from ingest import build_index
+    build_index()
+    reload_index()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    reload_index()
     yield
 
 
-app = FastAPI(title="RAG Q&A", lifespan=lifespan)
+app = FastAPI(title="RAG Q&A Dashboard", lifespan=lifespan)
+
+# ── Static files (dashboard HTML) ────────────────────────────────────────────
+STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-class Question(BaseModel):
-    question: str = Field(min_length=3)
-    k: int = Field(default=config.TOP_K, ge=1, le=10)
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    html_path = STATIC_DIR / "index.html"
+    if not html_path.exists():
+        raise HTTPException(404, "Dashboard not found.")
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
+# ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"index_loaded": "rag" in state, "llm_provider": config.LLM_PROVIDER}
+    return {
+        "index_loaded": "rag" in state,
+        "llm_provider": config.LLM_PROVIDER,
+        "error": state.get("error"),
+    }
+
+
+# ── Document management ───────────────────────────────────────────────────────
+DATA_DIR = Path(config.DATA_DIR)
+DATA_DIR.mkdir(exist_ok=True)
+
+
+@app.get("/documents")
+def list_documents():
+    """Return all PDF files in data/ with their size in KB."""
+    files = sorted(DATA_DIR.glob("*.pdf"))
+    return [
+        {"name": f.name, "size_kb": round(f.stat().st_size / 1024, 1)}
+        for f in files
+    ]
+
+
+@app.post("/documents", status_code=201)
+async def upload_document(file: UploadFile = File(...)):
+    """Upload a PDF and rebuild the index."""
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are accepted.")
+    dest = DATA_DIR / file.filename
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    try:
+        rebuild_index()
+    except Exception as e:
+        raise HTTPException(500, f"File saved but indexing failed: {e}")
+    return {"message": f"'{file.filename}' uploaded and index rebuilt.", "name": file.filename}
+
+
+@app.delete("/documents/{filename}")
+def delete_document(filename: str):
+    """Delete a PDF and rebuild the index."""
+    target = DATA_DIR / filename
+    if not target.exists():
+        raise HTTPException(404, f"'{filename}' not found.")
+    target.unlink()
+    try:
+        # Only rebuild if there are still PDFs left
+        if any(DATA_DIR.glob("*.pdf")):
+            rebuild_index()
+        else:
+            state.pop("rag", None)
+            state["error"] = "No documents. Upload a PDF to start."
+    except Exception as e:
+        raise HTTPException(500, f"File deleted but re-indexing failed: {e}")
+    return {"message": f"'{filename}' deleted."}
+
+
+@app.put("/documents/{filename}")
+async def replace_document(filename: str, file: UploadFile = File(...)):
+    """Replace an existing PDF with a new one and rebuild the index."""
+    target = DATA_DIR / filename
+    if not target.exists():
+        raise HTTPException(404, f"'{filename}' not found.")
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are accepted.")
+    with target.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    try:
+        rebuild_index()
+    except Exception as e:
+        raise HTTPException(500, f"File replaced but re-indexing failed: {e}")
+    return {"message": f"'{filename}' replaced and index rebuilt."}
+
+
+# ── Chat / Q&A ────────────────────────────────────────────────────────────────
+class Question(BaseModel):
+    question: str = Field(min_length=1)
+    k: int = Field(default=config.TOP_K, ge=1, le=10)
 
 
 @app.post("/ask")
 def ask(q: Question):
     if "rag" not in state:
-        raise HTTPException(503, f"Index not loaded. Run `python ingest.py` first. ({state.get('error')})")
+        raise HTTPException(
+            503,
+            state.get("error", "Index not loaded. Upload a PDF first."),
+        )
     try:
         return state["rag"].answer(q.question, q.k)
     except Exception as e:

@@ -12,7 +12,7 @@ import config
 def load_documents(data_dir: str):
     pdfs = sorted(Path(data_dir).glob("*.pdf"))
     if not pdfs:
-        sys.exit(f"No PDF found in '{data_dir}/'. Add some and re-run.")
+        raise FileNotFoundError(f"No PDF found in '{data_dir}/'. Add some and re-run.")
     docs = []
     for pdf in pdfs:
         pages = PyPDFLoader(str(pdf)).load()  # one Document per page, with metadata
