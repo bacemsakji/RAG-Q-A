@@ -2,6 +2,7 @@
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
@@ -15,7 +16,6 @@ state: dict = {}
 
 
 def reload_index():
-    """(Re)load the FAISS index into state."""
     try:
         state["rag"] = RAG()
         state.pop("error", None)
@@ -25,7 +25,6 @@ def reload_index():
 
 
 def rebuild_index():
-    """Rebuild the FAISS index from scratch and reload it."""
     from ingest import build_index
     build_index()
     reload_index()
@@ -39,7 +38,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RAG Q&A Dashboard", lifespan=lifespan)
 
-# ── Static files (dashboard HTML) ────────────────────────────────────────────
+# ── Static files ──────────────────────────────────────────────────────────────
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -59,7 +58,9 @@ def health():
     return {
         "index_loaded": "rag" in state,
         "llm_provider": config.LLM_PROVIDER,
-        "error": state.get("error"),
+        "reranker":     config.USE_RERANKER,
+        "bm25":         config.USE_BM25,
+        "error":        state.get("error"),
     }
 
 
@@ -70,17 +71,14 @@ DATA_DIR.mkdir(exist_ok=True)
 
 @app.get("/documents")
 def list_documents():
-    """Return all PDF files in data/ with their size in KB."""
-    files = sorted(DATA_DIR.glob("*.pdf"))
     return [
         {"name": f.name, "size_kb": round(f.stat().st_size / 1024, 1)}
-        for f in files
+        for f in sorted(DATA_DIR.glob("*.pdf"))
     ]
 
 
 @app.post("/documents", status_code=201)
-async def upload_document(file: UploadFile = File(...)):
-    """Upload a PDF and rebuild the index."""
+async def upload_document(file: Annotated[UploadFile, File()]):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are accepted.")
     dest = DATA_DIR / file.filename
@@ -95,13 +93,11 @@ async def upload_document(file: UploadFile = File(...)):
 
 @app.delete("/documents/{filename}")
 def delete_document(filename: str):
-    """Delete a PDF and rebuild the index."""
     target = DATA_DIR / filename
     if not target.exists():
         raise HTTPException(404, f"'{filename}' not found.")
     target.unlink()
     try:
-        # Only rebuild if there are still PDFs left
         if any(DATA_DIR.glob("*.pdf")):
             rebuild_index()
         else:
@@ -113,8 +109,7 @@ def delete_document(filename: str):
 
 
 @app.put("/documents/{filename}")
-async def replace_document(filename: str, file: UploadFile = File(...)):
-    """Replace an existing PDF with a new one and rebuild the index."""
+async def replace_document(filename: str, file: Annotated[UploadFile, File()]):
     target = DATA_DIR / filename
     if not target.exists():
         raise HTTPException(404, f"'{filename}' not found.")
@@ -130,19 +125,23 @@ async def replace_document(filename: str, file: UploadFile = File(...)):
 
 
 # ── Chat / Q&A ────────────────────────────────────────────────────────────────
+class HistoryMessage(BaseModel):
+    role: str       # "user" | "assistant"
+    content: str
+
+
 class Question(BaseModel):
     question: str = Field(min_length=1)
     k: int = Field(default=config.TOP_K, ge=1, le=10)
+    history: list[HistoryMessage] = Field(default_factory=list)
 
 
 @app.post("/ask")
 def ask(q: Question):
     if "rag" not in state:
-        raise HTTPException(
-            503,
-            state.get("error", "Index not loaded. Upload a PDF first."),
-        )
+        raise HTTPException(503, state.get("error", "Index not loaded. Upload a PDF first."))
     try:
-        return state["rag"].answer(q.question, q.k)
+        history = [{"role": m.role, "content": m.content} for m in q.history]
+        return state["rag"].answer(q.question, q.k, history=history)
     except Exception as e:
         raise HTTPException(502, f"LLM call failed: {e}")
