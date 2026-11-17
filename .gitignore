@@ -1,5 +1,6 @@
 index/
 data/*.pdf
+conversations/
 __pycache__/
 .venv/
 .env

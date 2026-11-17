@@ -33,7 +33,7 @@ USE_BM25 = os.getenv("USE_BM25", "true").lower() == "true"
 # ── LLM ──────────────────────────────────────────────────────────────────────
 LLM_PROVIDER    = os.getenv("LLM_PROVIDER",    "ollama")
 OLLAMA_URL      = os.getenv("OLLAMA_URL",      "http://localhost:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "qwen3:4b")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "qwen2.5:3b")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-5-5")
 LLM_MAX_TOKENS  = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 
