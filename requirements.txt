@@ -1,0 +1,10 @@
+langchain-community>=0.3
+langchain-text-splitters>=0.3
+langchain-huggingface>=0.1
+sentence-transformers>=3.0
+faiss-cpu>=1.8
+pypdf>=4.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+requests>=2.31
+anthropic>=0.40   # optional: only needed if LLM_PROVIDER=anthropic
